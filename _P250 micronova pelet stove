@@ -1,0 +1,885 @@
+#include "_Plugin_Helper.h"
+#include <SoftwareSerial.h>
+#ifdef USES_P250
+
+// #######################################################################################################
+// #################################### Plugin 250: MICRONOVA  ###########################
+// #######################################################################################################
+// For Pelet stove
+// to connect  the esp8266 to the micronova serial port look there
+//  https://github.com/philibertc/micronova_controller      
+// 
+// config the sensor, GPIO → Enable RX: is to activate the read or write in rom or ram of the stove
+// config the stove (Read_RAM, read_ROM, Write_RAM, Write_ROM )
+// 
+
+// to send a value to write in the stove
+// http://ip/commandevalueset,1,2,35
+// it will write in task 1, 2nd USER value the value 35 ( hex)
+// if the name  of the x value is On or Off, to power the stove you need send
+//      http://ip/commandevalueset,1,x,-1 for On
+// or     http://ip/commandevalueset,1,x,-2 for Off
+// if On or Off has the same "code" don't  need to creat 2 differentes commande
+// With some stove On or Off command must be repeted
+// Configuration rom ram read write:
+// to read in ram stove, ROM and Write are unchecked
+// to read in rOm stove, ROM is checked and Write is unchecked
+//to write  in ram stove, ROMis unckeked and Write is checked
+//to write  in rOM stove, ROM and Write are checked
+
+
+
+
+
+                                
+
+
+
+#define P250_TAILLE_ADRESSE 4
+#define PLUGIN_250
+#define PLUGIN_ID_250 4
+#define PLUGIN_NAME_250 "serial - micronova"
+#define PLUGIN_VALUENAME1_250 "FONCTION"
+#define P250_SENSOR_TYPE_INDEX 0
+#define P250_NR_OUTPUT_VALUES getValueCountFromSensorType(static_cast<Sensor_VType>(PCONFIG(P250_SENSOR_TYPE_INDEX)))
+#define P250_SERIAL_CONFIG PCONFIG(1)
+#define P250_RX_BUFFER PCONFIG(2)
+#define ENABLE_RX D2
+#define P250_DEFAULT_BAUDRATE 1200
+#define P250_DEFAULT_RX_BUFFER 32
+#define P250_BAUDRATE PCONFIG(3)
+SoftwareSerial StoveSerial;
+
+struct C_P {
+  byte R_RAM;
+  byte R_ROM;
+  byte W_RAM;
+  byte W_ROM;
+};
+struct config_Satus_poele
+{
+  byte Satus_poele_add;
+  int Satus_poele_ROM_RAM;
+};
+struct param_poele_globale
+{
+  C_P RAM_ROM_R_W;
+  config_Satus_poele status_conf;
+};
+struct _Param_Fonction
+{
+  byte Add;
+  byte Add_option;
+  int RAM_ROM_R_W_Repeat;
+};
+struct _Param_Fonctions
+{
+  _Param_Fonction conf_User1;
+  _Param_Fonction conf_User2;
+  _Param_Fonction conf_User3;
+  _Param_Fonction conf_User4;
+};
+
+struct Param_global
+{
+  param_poele_globale poele_param;
+  _Param_Fonctions foncrtion;
+};
+
+// struct C_P code_read_write_where = {0, 0, 0, 0};
+
+uint8_t serialconfig;
+
+uint32_t Value_Baud[10] = {110, 220, 300, 1200, 2400, 9600, 19200, 38400, 57600, 115200};
+
+String Plugin_250_valuename(uint8_t value_nr, bool displayString)
+{
+  String name = F("FONCTION");
+
+  if (value_nr != 0)
+    name += String(value_nr + 1);
+  if (!displayString)
+    name.toLowerCase();
+  return name;
+}
+
+boolean Plugin_250(uint8_t function, struct EventStruct *event, String &string)
+{
+  struct Param_global toto;
+  boolean success = false;
+  switch (function)
+  {
+  case PLUGIN_DEVICE_ADD:
+  {
+    Device[++deviceCount].Number = PLUGIN_ID_250;
+    Device[deviceCount].Type = DEVICE_TYPE_TRIPLE;
+    Device[deviceCount].VType = Sensor_VType::SENSOR_TYPE_QUAD;
+    Device[deviceCount].Ports = 0;
+
+    Device[deviceCount].PullUpOption = false;
+    Device[deviceCount].InverseLogicOption = false;
+    Device[deviceCount].FormulaOption = true;
+    Device[deviceCount].DecimalsOnly = true;
+    Device[deviceCount].ValueCount = 4;
+    Device[deviceCount].SendDataOption = true;
+    Device[deviceCount].TimerOption = true;
+    Device[deviceCount].TimerOptional = true;
+    Device[deviceCount].GlobalSyncOption = true;
+    Device[deviceCount].OutputDataType = Output_Data_type_t::Simple;
+
+    break;
+  }
+
+  case PLUGIN_GET_DEVICENAME:
+  {
+    string = F(PLUGIN_NAME_250);
+    break;
+  }
+
+  case PLUGIN_GET_DEVICEVALUENAMES:
+  {
+    for (uint8_t i = 0; i < VARS_PER_TASK; ++i)
+    {
+      if (i < P250_NR_OUTPUT_VALUES)
+      {
+        safe_strncpy(
+            ExtraTaskSettings.TaskDeviceValueNames[i],
+            Plugin_250_valuename(i, false),
+            sizeof(ExtraTaskSettings.TaskDeviceValueNames[i]));
+        ExtraTaskSettings.TaskDeviceValueDecimals[i] = 2;
+      }
+      else
+      {
+        ZERO_FILL(ExtraTaskSettings.TaskDeviceValueNames[i]);
+      }
+    }
+    break;
+  }
+
+  case PLUGIN_GET_DEVICEVALUECOUNT:
+  {
+    event->Par1 = P250_NR_OUTPUT_VALUES;
+    success = true;
+    break;
+  }
+
+  case PLUGIN_GET_DEVICEVTYPE:
+  {
+    event->sensorType = static_cast<Sensor_VType>(PCONFIG(P250_SENSOR_TYPE_INDEX));
+    event->idx = P250_SENSOR_TYPE_INDEX;
+    success = true;
+    break;
+  }
+
+  case PLUGIN_SET_DEFAULTS:
+  {
+
+    //      P250_BAUDRATE         = P250_DEFAULT_BAUDRATE;
+    //    P250_RX_BUFFER        = P250_DEFAULT_RX_BUFFER;
+
+    PCONFIG(P250_SENSOR_TYPE_INDEX) = static_cast<uint8_t>(Sensor_VType::SENSOR_TYPE_SINGLE);
+    for (uint8_t i = 0; i < VARS_PER_TASK; ++i)
+    {
+      ExtraTaskSettings.TaskDeviceValueDecimals[i] = 2;
+    }
+
+    success = true;
+    break;
+  }
+
+  case PLUGIN_GET_DEVICEGPIONAMES:
+  {
+    // definition des variables
+    const __FlashStringHelper *options_baud[10] =
+        {F("110"), F("220"), F("300"), F("1200"), F("2400"), F("9600"), F("19200"),
+         F("38400"), F("57600"), F("115200")
+
+        };
+    uint8_t Reponse_baud = PCONFIG(3);
+
+    const __FlashStringHelper *options_buffer[3] =
+        {F("32"), F("64"), F("128")};
+    int options_valeur_buffer[3] = {32, 64, 128};
+    int Reponse_buffer = P250_RX_BUFFER;
+
+    int Valeur_parity[40] =
+        {
+            SWSERIAL_5N1, SWSERIAL_6N1, SWSERIAL_7N1, SWSERIAL_8N1, SWSERIAL_5E1, SWSERIAL_6E1, SWSERIAL_7E1,
+            SWSERIAL_8E1, SWSERIAL_5O1, SWSERIAL_6O1, SWSERIAL_7O1, SWSERIAL_8O1, SWSERIAL_5M1, SWSERIAL_6M1,
+            SWSERIAL_7M1, SWSERIAL_8M1, SWSERIAL_5S1, SWSERIAL_6S1, SWSERIAL_7S1, SWSERIAL_8S1, SWSERIAL_5N2,
+            SWSERIAL_6N2, SWSERIAL_7N2, SWSERIAL_8N2, SWSERIAL_5E2, SWSERIAL_6E2, SWSERIAL_7E2, SWSERIAL_8E2,
+            SWSERIAL_5O2, SWSERIAL_6O2, SWSERIAL_7O2, SWSERIAL_8O2, SWSERIAL_5M2, SWSERIAL_6M2, SWSERIAL_7M2,
+            SWSERIAL_8M2, SWSERIAL_5S2, SWSERIAL_6S2, SWSERIAL_7S2, SWSERIAL_8S2};
+
+    const __FlashStringHelper *options_SERIAL_Parte[40] =
+        {
+            F("SWSERIAL_5N1"), F("SWSERIAL_6N1"), F("SWSERIAL_7N1"), F("SWSERIAL_8N1"), F("SWSERIAL_5E1"),
+            F("SWSERIAL_6E1"), F("SWSERIAL_7E1"), F("SWSERIAL_8E1"), F("SWSERIAL_5O1"), F("SWSERIAL_6O1"),
+            F("SWSERIAL_7O1"), F("SWSERIAL_8O1"), F("SWSERIAL_5M1"), F("SWSERIAL_6M1"), F("SWSERIAL_7M1"),
+            F("SWSERIAL_8M1"), F("SWSERIAL_5S1"), F("SWSERIAL_6S1"), F("SWSERIAL_7S1"), F("SWSERIAL_8S1"),
+            F("SWSERIAL_5N2"), F("SWSERIAL_6N2"), F("SWSERIAL_7N2"), F("SWSERIAL_8N2"), F("SWSERIAL_5E2"),
+            F("SWSERIAL_6E2"), F("SWSERIAL_7E2"), F("SWSERIAL_8E2"), F("SWSERIAL_5O2"), F("SWSERIAL_6O2"),
+            F("SWSERIAL_7O2"), F("SWSERIAL_8O2"), F("SWSERIAL_5M2"), F("SWSERIAL_6M2"), F("SWSERIAL_7M2"),
+            F("SWSERIAL_8M2"), F("SWSERIAL_5S2"), F("SWSERIAL_6S2"), F("SWSERIAL_7S2"), F("SWSERIAL_8S2")};
+
+    int reponse_config = PCONFIG(1);
+
+    // Partie configuration et affichage dans le bandeau sensor
+
+    event->String1 = formatGpioName_input(F("RX"));  // RX gpio
+    event->String2 = formatGpioName_output(F("TX")); // TX gpio
+    event->String3 = formatGpioName_output(F("Enable RX"));    //Enable gpio pour la réponse 
+
+    addFormSelector(F("Baud_Rate"), F("P250_baud"), 10, options_baud, NULL,
+                    Reponse_baud);                   //baud normalement 1200
+
+    addFormSelector(F("Serial_Parity"), F("SERIAL_PARITY"), 40, options_SERIAL_Parte,
+                    Valeur_parity, reponse_config);       //parité 8N2
+
+    addFormSelector(F("Serial_Rx_Buffer"), F("Serial_Rx_Buffer"), 3, options_buffer,
+                    options_valeur_buffer, Reponse_buffer);   //taille buffer.
+
+    break;
+  }
+
+  case PLUGIN_WEBFORM_LOAD:
+  {
+    struct C_P param_poele_Case_Load;
+    struct config_Satus_poele conf_status_poele_Case_Load;
+    struct _Param_Fonction One_Fonction_Load;
+    struct _Param_Fonctions fonctions_conf_Case_Load;
+
+    serialHelper_getSerialTypeLabel(event);
+
+    int8_t Plugin_250_DallasPin_RX = CONFIG_PIN1;
+    int8_t Plugin_250_DallasPin_TX = CONFIG_PIN2;
+
+    addFormSubHeader(F("Configuration des fonctions"));
+
+    if (Plugin_250_DallasPin_TX == -1)
+    {
+      Plugin_250_DallasPin_TX = Plugin_250_DallasPin_RX;
+    }
+
+    {
+
+      const String P250_HEX_INPUT_PATTERN = F("(0x)?[0-9a-fA-F]{0,16}"); // Caractère utilisable pour ecrire un adresse
+                                                                         //  exemple 0x21
+      String strCode;
+      strCode.reserve(20);
+
+      addFormSubHeader(F("Configuration des codes ROM RAM pour la lecture et l'écriture"));
+      addRowLabel(F("Code RAM_ROM"));
+      html_table(EMPTY_STRING, false); // Sub-table
+      html_table_header(F("Code Lecture RAM"));
+      html_table_header(F("Code Lecture ROM"));
+      html_table_header(F("Code Ecriture RAM"));
+      html_table_header(F("Code Ecriture ROM"));
+      html_TR_TD();
+
+      LoadCustomTaskSettings(event->TaskIndex, (byte *)&toto, sizeof(toto));  //stocage de parametre
+
+
+      param_poele_Case_Load = toto.poele_param.RAM_ROM_R_W;
+      conf_status_poele_Case_Load = toto.poele_param.status_conf;
+
+      {
+
+        {
+          addTextBox(F("code_Read_RAM"),
+                     Convertir_Chaine_decimal_hexa(param_poele_Case_Load.R_RAM),
+                     P250_TAILLE_ADRESSE, false, false, P250_HEX_INPUT_PATTERN, EMPTY_STRING);
+          html_TD();
+          addTextBox(F("code_Read_ROM"),
+                     Convertir_Chaine_decimal_hexa(param_poele_Case_Load.R_ROM),
+                     P250_TAILLE_ADRESSE, false, false, P250_HEX_INPUT_PATTERN, EMPTY_STRING);
+          html_TD();
+          addTextBox(F("code_Write_RAM"),
+                     Convertir_Chaine_decimal_hexa(param_poele_Case_Load.W_RAM),
+                     P250_TAILLE_ADRESSE, false, false, P250_HEX_INPUT_PATTERN, EMPTY_STRING);
+          html_TD();
+          addTextBox(F("code_Write_ROM"),
+                     Convertir_Chaine_decimal_hexa(param_poele_Case_Load.W_ROM),
+                     P250_TAILLE_ADRESSE, false, false, P250_HEX_INPUT_PATTERN, EMPTY_STRING);
+
+          html_end_table();
+
+          addFormSubHeader(F("Configuration Pour le status du poele"));
+
+          addRowLabel(F("Statut poele"));
+          html_table(EMPTY_STRING, false); // Sub-table
+          html_table_header(F("Adresse Status Poele"));
+          html_table_header(F("Localiser du status dans RAM_ROM"));
+          html_TR_TD();
+          addTextBox(F("Status du poele adresse"),
+                     Convertir_Chaine_decimal_hexa(conf_status_poele_Case_Load.Satus_poele_add),
+                     P250_TAILLE_ADRESSE, false, false, P250_HEX_INPUT_PATTERN, EMPTY_STRING);
+          html_TD();
+
+          addCheckBox(F("Status_Ram_ROM"), conf_status_poele_Case_Load.Satus_poele_ROM_RAM == 1, false);
+
+          html_end_table();
+        }
+      }
+      addFormSubHeader(F("Configuration des fonctions"));
+      addRowLabel(F("POELE"));
+      html_table(EMPTY_STRING, false); // Sub-table
+      html_table_header(F("FONCTION"));
+      html_table_header(F("ROM"));
+      html_table_header(F("Ecriture"));
+      html_table_header(F("Adresse"));
+      html_table_header(F("Valeur_ON_OFF"));
+      html_table_header(F("Répétition"));
+
+      fonctions_conf_Case_Load = toto.foncrtion;
+
+      for (uint8_t i = 0; i < P250_NR_OUTPUT_VALUES; ++i)
+      {
+
+        switch (i)
+        {
+        case 0:
+          One_Fonction_Load = fonctions_conf_Case_Load.conf_User1;
+          break;
+        case 1:
+          One_Fonction_Load = fonctions_conf_Case_Load.conf_User2;
+          break;
+
+        case 2:
+          One_Fonction_Load = fonctions_conf_Case_Load.conf_User3;
+          break;
+        case 3:
+          One_Fonction_Load = fonctions_conf_Case_Load.conf_User4;
+          break;
+      
+        }
+
+        String DeviceName = String(ExtraTaskSettings.TaskDeviceValueNames[i]);
+        addFormNote(String(One_Fonction_Load.RAM_ROM_R_W_Repeat));
+        html_TR_TD();
+        addFormCheckBox(DeviceName, DeviceName + F("ROM"), choix_RAM_ROM(One_Fonction_Load.RAM_ROM_R_W_Repeat) == 1, false);
+        html_TD();
+        addCheckBox(DeviceName + F("Ecriture"), choix_Read_Write(One_Fonction_Load.RAM_ROM_R_W_Repeat) == 1, false);
+        html_TD();
+        addTextBox(DeviceName + F("Adresse"),
+                   Convertir_Chaine_decimal_hexa(One_Fonction_Load.Add), P250_TAILLE_ADRESSE, false, false, P250_HEX_INPUT_PATTERN, EMPTY_STRING);
+
+        if ((DeviceName == F("On")) || (DeviceName == F("Off")))
+        {
+          html_TD();
+          addTextBox(DeviceName + F("VALEUR_ON_OFF"),
+                     Convertir_Chaine_decimal_hexa(One_Fonction_Load.Add_option),
+                     P250_TAILLE_ADRESSE, false, false, P250_HEX_INPUT_PATTERN, EMPTY_STRING);
+          html_TD();
+          addCheckBox(DeviceName + F("repetition"), choix_Repetition(One_Fonction_Load.RAM_ROM_R_W_Repeat) == 1, false);
+        }
+      }
+      html_end_table();
+    }
+
+    success = true;
+    break;
+  }
+  case PLUGIN_WEBFORM_SAVE:
+  {
+    int choix;
+
+    struct param_poele_globale config_poele_global_Case_save;
+    struct C_P param_poele_Case_Save;
+    struct _Param_Fonction One_Fonction_Save;
+    struct _Param_Fonctions fonctions_conf_Case_Save;
+
+    PCONFIG(1) = getFormItemInt(F("SERIAL_PARITY"));
+    PCONFIG(2) = getFormItemInt(F("Serial_Rx_Buffer"));
+    PCONFIG(3) = getFormItemInt(F("P250_baud"));
+    param_poele_Case_Save.R_RAM = getFormItemInt(F("code_Read_RAM"));
+    param_poele_Case_Save.R_ROM = getFormItemInt(F("code_Read_ROM"));
+    param_poele_Case_Save.W_RAM = getFormItemInt(F("code_Write_RAM"));
+    param_poele_Case_Save.W_ROM = getFormItemInt(F("code_Write_ROM"));
+    config_poele_global_Case_save.RAM_ROM_R_W = param_poele_Case_Save;
+
+    config_poele_global_Case_save.status_conf.Satus_poele_add = getFormItemInt(F("Status du poele adresse"));
+    config_poele_global_Case_save.status_conf.Satus_poele_ROM_RAM = isFormItemChecked(F("Status_Ram_ROM"));
+
+    int8_t Plugin_250_DallasPin_RX = CONFIG_PIN1;
+    int8_t Plugin_250_DallasPin_TX = CONFIG_PIN2;
+
+    if (Plugin_250_DallasPin_TX == -1)
+      Plugin_250_DallasPin_TX = Plugin_250_DallasPin_RX;
+    int Rom_RAM, Read_Write, Repetition;
+    // byte fonction_add, fonction_option;
+    for (uint8_t i = 0; i < P250_NR_OUTPUT_VALUES; ++i)
+    {
+
+      Repetition = 0;
+      choix = 0;
+      String DeviceName = String(ExtraTaskSettings.TaskDeviceValueNames[i]);
+      Rom_RAM = isFormItemChecked(DeviceName + F("ROM"));
+      One_Fonction_Save.Add  = getFormItemInt(DeviceName + F("Adresse"));
+      Read_Write = isFormItemChecked(DeviceName + F("Ecriture"));
+      if ((DeviceName == F("On")) || (DeviceName == F("Off")))
+      {
+        One_Fonction_Save.Add_option = getFormItemInt(DeviceName + F("VALEUR_ON_OFF"));
+        Repetition = isFormItemChecked(DeviceName + F("repetition"));
+      }
+
+      choix = 4 * Repetition + 2 * Read_Write + Rom_RAM; // CODE DES INFO EN 1 SEUL
+      //One_Fonction_Save.Add = fonction_add;
+      One_Fonction_Save.RAM_ROM_R_W_Repeat = choix;
+
+      switch (i)
+      {
+      case 0:
+        fonctions_conf_Case_Save.conf_User1 = One_Fonction_Save;
+
+        break;
+      case 1:
+        fonctions_conf_Case_Save.conf_User2 = One_Fonction_Save;
+        break;
+
+      case 2:
+        fonctions_conf_Case_Save.conf_User3 = One_Fonction_Save;
+        break;
+      case 3:
+        fonctions_conf_Case_Save.conf_User4 = One_Fonction_Save;
+        break;
+      default:
+        break;
+      }
+    }
+    toto.foncrtion = fonctions_conf_Case_Save;
+    toto.poele_param = config_poele_global_Case_save;
+
+    SaveCustomTaskSettings(event->TaskIndex, (byte *)&toto, sizeof(toto));
+
+    success = true;
+    break;
+  }
+
+  case PLUGIN_WEBFORM_SHOW_CONFIG:
+  {
+    LoadCustomTaskSettings(event->TaskIndex, (byte *)&toto, sizeof(toto));
+
+    LoadTaskSettings(event->TaskIndex);
+
+    for (uint8_t i = 0; i < VARS_PER_TASK; ++i)
+      if (i < P250_NR_OUTPUT_VALUES)
+        if (i != 0)
+          string += F("<br>");
+
+    success = true;
+    break;
+  }
+
+  case PLUGIN_INIT:
+  {
+
+    LoadCustomTaskSettings(event->TaskIndex, (byte *)&toto, sizeof(toto));
+
+    LoadTaskSettings(event->TaskIndex);
+
+    
+    pinMode(CONFIG_PIN3, OUTPUT);
+    digitalWrite(CONFIG_PIN3, HIGH);
+    int baud = P250_BAUDRATE;
+
+    String log = F("Initialisation port serie:");
+    log += F("RX =");
+    log += CONFIG_PIN1;
+    log += F("_____TX =");
+    log += CONFIG_PIN2;
+    log += F("ENABLE RX =");
+    log += CONFIG_PIN3;
+
+    int8_t Plugin_250_DallasPin_RX = CONFIG_PIN1;
+    int8_t Plugin_250_DallasPin_TX = CONFIG_PIN2;
+
+    addLog(LOG_LEVEL_INFO, log);
+
+    if ((validGpio(Plugin_250_DallasPin_RX)) && (validGpio(Plugin_250_DallasPin_TX)))
+    {
+
+      // initialisation de sofwreserial
+      StoveSerial.enableIntTx(false);
+      StoveSerial.begin(Value_Baud[baud], static_cast<SoftwareSerialConfig>(PCONFIG(1)),
+                        Plugin_250_DallasPin_RX, Plugin_250_DallasPin_TX, false,
+                        P250_RX_BUFFER, P250_RX_BUFFER);
+      StoveSerial.flush();
+
+      delay(2000);
+
+
+      success = true;
+    }
+    break;
+  }
+
+  case PLUGIN_READ:
+  {
+    String log;
+
+    int choix_case_read;
+
+    struct _Param_Fonction One_fonction_read_case;
+    struct config_Satus_poele status_poele_read_case;
+    //struct C_P RAM_ROM_R_W;
+    LoadCustomTaskSettings(event->TaskIndex, (byte *)&toto, sizeof(toto));
+
+    status_poele_read_case = toto.poele_param.status_conf;
+
+    for (uint8_t i = 0; i < VARS_PER_TASK; ++i)
+    {
+      switch (i)
+      {
+      case 0:
+        One_fonction_read_case = toto.foncrtion.conf_User1;
+        choix_case_read = toto.foncrtion.conf_User1.RAM_ROM_R_W_Repeat;
+
+        break;
+      case 1:
+        One_fonction_read_case = toto.foncrtion.conf_User2;
+        choix_case_read = toto.foncrtion.conf_User2.RAM_ROM_R_W_Repeat;
+        break;
+
+      case 2:
+        One_fonction_read_case = toto.foncrtion.conf_User3;
+        choix_case_read = toto.foncrtion.conf_User3.RAM_ROM_R_W_Repeat;
+
+        break;
+      case 3:
+        One_fonction_read_case = toto.foncrtion.conf_User4;
+        choix_case_read = toto.foncrtion.conf_User4.RAM_ROM_R_W_Repeat;
+        break;
+      }
+      int lieux_Case_Read;
+      lieux_Case_Read = choix_RAM_ROM(choix_case_read);
+
+      if (i < P250_NR_OUTPUT_VALUES)
+      {
+
+        if (choix_Read_Write(choix_case_read) == 1) //
+        {
+          if ((String(ExtraTaskSettings.TaskDeviceValueNames[i]) == String("On"))
+               || (String(ExtraTaskSettings.TaskDeviceValueNames[i]) == String("Off")))
+          {
+            delay(80);
+            UserVar[(event->BaseVarIndex + i)] = (interroge_ram_eprom_poele(
+                Where_Read_Write(status_poele_read_case.Satus_poele_ROM_RAM,
+                                 toto.poele_param.RAM_ROM_R_W),
+                status_poele_read_case.Satus_poele_add, CONFIG_PIN3));
+          }
+        }
+        else
+        {
+          UserVar[(event->BaseVarIndex + i)] =
+              interroge_ram_eprom_poele(
+                  Where_Read_Write(lieux_Case_Read,
+                                   toto.poele_param.RAM_ROM_R_W),
+                  One_fonction_read_case.Add, CONFIG_PIN3);
+        }
+      }
+      delay(200);
+    }
+
+    success = true;
+    break;
+  }
+
+  case PLUGIN_WRITE:
+  {
+   // byte verification;
+    String log;
+    LoadCustomTaskSettings(event->TaskIndex, (byte *)&toto, sizeof(toto));
+
+    String command = parseString(string, 1);
+    if (command == F("commandevalueset"))
+    {
+      if (event->Par1 == event->TaskIndex + 1) // make sure that this instance is the target
+      {
+        float floatValue = 0;
+
+        if (string2float(parseString(string, 4), floatValue))
+        {
+          if (loglevelActiveFor(LOG_LEVEL_INFO))
+          {
+            String log = F("Dummy: Index ");
+            log += event->Par1;
+            log += F(" value ");
+            log += event->Par2;
+            addLog(LOG_LEVEL_INFO, log);
+          }
+          _Param_Fonction One_Fonction_write;
+          int var_y = static_cast<int>(floatValue);
+          struct C_P Where_Write;
+          Where_Write = toto.poele_param.RAM_ROM_R_W;
+
+          int num_variable;
+          int choix_Write_Case = 0;
+          int lieux;
+          num_variable = event->Par2 - 1;
+          log = F("test num_variable = ");
+          log += num_variable;
+          addLog(LOG_LEVEL_INFO, log);
+
+          switch (num_variable)
+          {
+          case 0:
+            One_Fonction_write = toto.foncrtion.conf_User1;
+            choix_Write_Case = toto.foncrtion.conf_User1.RAM_ROM_R_W_Repeat;
+            break;
+          case 1:
+            One_Fonction_write = toto.foncrtion.conf_User2;
+            choix_Write_Case = toto.foncrtion.conf_User2.RAM_ROM_R_W_Repeat;
+            break;
+          case 2:
+            One_Fonction_write = toto.foncrtion.conf_User3;
+            choix_Write_Case = toto.foncrtion.conf_User3.RAM_ROM_R_W_Repeat;
+            break;
+          case 3:
+            One_Fonction_write = toto.foncrtion.conf_User4;
+            choix_Write_Case = toto.foncrtion.conf_User4.RAM_ROM_R_W_Repeat;
+            break;
+          }
+          lieux = choix_Write_Case - 4 * choix_Repetition(choix_Write_Case);
+
+          log = F("dans plugin write");
+          log += F("lieux ou ecrire = ");
+          log += lieux;
+          addLog(LOG_LEVEL_ERROR, log);
+
+          switch (var_y)
+          {
+          case -1:
+            Ecriture_ram_eprom_poele(
+                Where_Read_Write(lieux, Where_Write), One_Fonction_write.Add, One_Fonction_write.Add_option,
+                CONFIG_PIN3);
+
+            if (choix_Repetition(choix_Write_Case) == 1)
+            {
+              delay(140);
+              Ecriture_ram_eprom_poele(
+                  Where_Read_Write(lieux, Where_Write), One_Fonction_write.Add, One_Fonction_write.Add_option,
+                  CONFIG_PIN3);
+            }
+
+            break;
+          case -2:
+            Ecriture_ram_eprom_poele(
+                Where_Read_Write(lieux, Where_Write),
+                One_Fonction_write.Add, One_Fonction_write.Add_option,
+                CONFIG_PIN3);
+
+            if (choix_Repetition(choix_Write_Case) == 1)
+            {
+              delay(140);
+              Ecriture_ram_eprom_poele(
+                  Where_Read_Write(lieux, Where_Write), One_Fonction_write.Add, One_Fonction_write.Add_option,
+                  CONFIG_PIN3);
+            }
+            break;
+
+          default:
+
+            if (UserVar[event->BaseVarIndex + event->Par2 - 1] != floatValue)
+            {
+              UserVar[event->BaseVarIndex + event->Par2 - 1] = floatValue;
+              Ecriture_ram_eprom_poele(Where_Read_Write(lieux, Where_Write), One_Fonction_write.Add, var_y, CONFIG_PIN3);
+            }
+
+            break;
+          }
+
+          success = true;
+        }
+        else
+        { // float conversion failed!
+          if (loglevelActiveFor(LOG_LEVEL_ERROR))
+          {
+            log = F("Dummy: Index ");
+            log += event->Par1;
+            log += F(" value ");
+            log += event->Par2;
+            log += F(" parameter3: ");
+            log += parseStringKeepCase(string, 4);
+            log += F(" not a float value!");
+            addLog(LOG_LEVEL_ERROR, log);
+          }
+        }
+      }
+    }
+
+    break;
+  }
+  }
+  return success;
+}
+
+#endif // USES_P250
+
+void Ecriture_ram_eprom_poele(byte Type, byte Addr, byte Data, uint8_t enable_rx)
+{                                         // ecriture dans la ram ou rom dans le poele (type = 0x80 pour ram, 0xA2 pour la romm
+  byte cs = ((Type + Addr + Data) % 256); // (checksum pour verifier l'envoie des donner  (somme de type, addresse,valeur modulo 256
+  StoveSerial.write(Type);
+  StoveSerial.write(Addr);
+  StoveSerial.write(Data);
+  StoveSerial.write(cs);
+  digitalWrite(enable_rx, LOW);
+  StoveSerial.flush();
+}
+
+byte lit_reponse_poele(uint8_t enable_rx)
+{ // lecture de la reponse du Poele
+  uint8_t rxCount = 0;
+  byte val = 0;
+  char stoveRxData[2];
+
+  stoveRxData[0] = 0x00;
+  stoveRxData[1] = 0x00;
+  while (StoveSerial.available())
+  {
+    stoveRxData[rxCount] = StoveSerial.read();
+    rxCount++;
+  }
+
+  digitalWrite(enable_rx, HIGH);
+  if (rxCount == 2)
+    val = stoveRxData[1];
+  StoveSerial.flush();
+
+  return val;
+}
+
+byte interroge_ram_eprom_poele(byte ram_eprom, byte adresse, uint8_t enable_rx)
+{ // demande la valeur de la ram ou rom à la adresse
+  String log;
+  uint8_t reponse_poele;
+  StoveSerial.write(ram_eprom);
+  StoveSerial.write(adresse);
+  StoveSerial.flush();
+
+  digitalWrite(enable_rx, LOW);
+  delay(100);
+  reponse_poele = lit_reponse_poele(enable_rx);
+  log = F("RAM ROM ECRTITURE LECTURE");
+  log += ram_eprom;
+  log += F("Adresse");
+  log += adresse;
+  log += F("reponse = ");
+  log += reponse_poele;
+
+  addLog(LOG_LEVEL_INFO, log);
+
+  return reponse_poele;
+}
+
+
+
+String Convertir_Chaine_decimal_hexa(uint8_t Valeur)
+{ // convertie un nombre  en hexa
+  String Chaine;
+  Chaine = "";
+  uint8_t quotient;
+  uint8_t reste;
+  reste = Valeur % 16;
+  quotient = (Valeur - reste) / 16;
+  Chaine = "0x" + Convertir_hex_elementaire(quotient) + Convertir_hex_elementaire(reste);
+  return Chaine;
+}
+
+String Convertir_hex_elementaire(uint8_t Valeur)
+
+{ // convertie un nombre <=16 en hexa
+  String Chaine;
+
+  if (Valeur <= 9)
+    Chaine = String(Valeur);
+  else
+    switch (Valeur)
+    {
+    case 10:
+      Chaine = "A";
+      break;
+
+    case 11:
+      Chaine = "B";
+      break;
+
+    case 12:
+      Chaine = "C";
+      break;
+
+    case 13:
+      Chaine = "D";
+      break;
+
+    case 14:
+      Chaine = "E";
+      break;
+
+    case 15:
+      Chaine = "F";
+      break;
+    }
+
+  return Chaine;
+}
+
+int choix_RAM_ROM(int valeur)
+{
+
+  int reste;
+  reste = valeur % 2;
+
+  return reste;
+}
+
+int choix_Read_Write(int valeur)
+{
+
+  int reste;
+  valeur -= choix_RAM_ROM(valeur);
+  reste = (valeur / 2) % 2;
+
+  return reste;
+}
+
+int choix_Repetition(int valeur)
+{
+
+  int reste;
+
+  reste = (valeur - 2 * choix_Read_Write(valeur) - choix_RAM_ROM(valeur)) / 4;
+
+  return reste;
+}
+
+byte Where_Read_Write(int choice, struct C_P code_where)
+{
+  int temp;
+  byte val = 0;
+  temp = choice - 4 * choix_Repetition(choice);
+  String log;
+  log = F("ou ecrire = ");
+  log += choice;
+  addLog(LOG_LEVEL_INFO, log);
+
+  switch (temp)
+  {
+  case 0:
+    val = code_where.R_RAM;
+    break;
+
+  case 1:
+    val = code_where.R_ROM;
+    break;
+
+  case 2:
+    val = code_where.W_RAM;
+    break;
+
+  case 3:
+    val = code_where.W_ROM;
+    break;
+  }
+  return val;
+}
